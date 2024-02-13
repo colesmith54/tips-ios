@@ -1,0 +1,527 @@
+//
+//  ViewController.swift
+//  TipsController
+//
+//  Created by Prasan Dhareshwar on 1/15/21.
+//
+
+import UIKit
+import CoreMotion
+import MediaPlayer
+import AVFoundation
+import EasyTipView
+
+class ViewController: UIViewController, BLEPeripheralProtocol, BLERecvDelegate {
+    private var audioLevel : Float = 0.0
+//    private var mSensorQuat = Quaternion()
+//    private var mQuat = Quaternion()
+//    private var mCalibrateQuat = Quaternion()
+    private var mSensorQuat = CMQauternionControl()
+    private var mQuat = CMQauternionControl()
+    private var mCalibrateQuat = CMQauternionControl()
+    private var mCalibrated: Bool = false
+    private var mFlipDown: Int = 0
+    private var curSkipSend: Int = 0
+    var status: String = ""
+    private var mMotionStateY: Float = 0;
+    private var mMotionStateX: Float = 0;
+    private var mDeviceId: Int = 1
+    private var mButtonState: Int = 0 //0-> not pressed; 1->button1 pressed(not being used); 2->button2 pressed; 3 ->calibrate button pressed
+    private var mStrBuilder: NSString = NSString()
+    private var mSensorData: String = ""
+    private var skipSendMax: Int = 3
+    private var mVibrationStrength: Int = 2
+    private var mBLEstarted: Bool = false;
+
+
+//    private var server = ServerConnection("", port: 0)
+    var ble: BLEPeripheralManager?
+    
+    var preferences = EasyTipView.Preferences()
+    
+    var tipView = EasyTipView.init(text: "Click to Calibrate")
+
+    //@IBOutlet weak var delay: UITextField!
+    
+    //@IBAction func delayEnter(_ sender: Any) {
+    //    skipSendMax = Int(delay.text!) ?? 0
+    //}
+    
+    func addDoneButtonOnKeyboard(){
+            let doneToolbar: UIToolbar = UIToolbar(frame: CGRect.init(x: 0, y: 0, width: UIScreen.main.bounds.width, height: 50))
+            doneToolbar.barStyle = .default
+
+            let flexSpace = UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
+            let done: UIBarButtonItem = UIBarButtonItem(title: "Done", style: .done, target: self, action: #selector(self.doneButtonAction))
+
+            let items = [flexSpace, done]
+            doneToolbar.items = items
+            doneToolbar.sizeToFit()
+
+            //delay.inputAccessoryView = doneToolbar
+    }
+
+    @objc func doneButtonAction(){
+    //    delay.resignFirstResponder()
+    }
+        
+    @IBOutlet weak var userGuide: UITextView!
+    
+    //@IBOutlet weak var wQuaternion: UITextField!
+    
+    //@IBOutlet weak var xQuaternion: UITextField!
+    
+    //@IBOutlet weak var yQuaternion: UITextField!
+    
+    //@IBOutlet weak var zQuaternion: UITextField!
+    
+    var motion = CMMotionManager()
+    
+    @IBOutlet weak var viewInstructions: UIBarButtonItem!
+    
+    @IBAction func viewInstructionsClick(_ sender: Any) {
+        
+        let vc = storyboard?.instantiateViewController(identifier: "instructionView") as! InstructionViewController
+        vc.title = "Instructions Page"
+        
+        navigationController?.pushViewController(vc, animated: true)
+    }
+    
+    @IBOutlet weak var userGuideBtn: UIBarButtonItem!
+    
+    
+    @IBAction func userGuideClick(_ sender: Any) {
+        let vc = storyboard?.instantiateViewController(identifier: "userguideView") as! UserGuideViewController
+        vc.title = "User Guide"
+        
+        navigationController?.pushViewController(vc, animated: true)
+    }
+    
+    
+    @IBOutlet weak var userGuideView: UITextView!
+    
+    
+    @IBOutlet weak var sliderValue: UISlider!
+    
+    
+    @IBAction func sliderChange(_ sender: Any) {
+        mVibrationStrength = Int(sliderValue.value)
+    }
+    
+    
+    @IBOutlet weak var joinButton: UIButton!
+    
+    /*
+    @IBAction func joinServer(_ sender: Any) {
+        let response = RemoteTunnel()
+        if (response.serverPort != nil) && (response.serverUrl != nil) {
+            server = ServerConnection.init(response.serverUrl!, port: response.serverPort!)
+            server.initNetworkCommunication()
+        }
+        joinButton.setTitle("Connected", for: .normal)
+        joinButton.isEnabled = false
+        userGuideView.removeFromSuperview()
+        
+    }*/
+    
+    @IBOutlet weak var calibrateButton: UIButton!
+    
+    @IBOutlet weak var streamStatus: UILabel!
+    
+    @IBOutlet weak var Touch: UILabel!
+    
+    
+    @IBAction func calibrateAction(_ sender: Any) {
+        self.mCalibrateQuat = self.mSensorQuat.inverse()
+        self.mCalibrated = true
+        print("Device Calibrated...")
+        Touch.center = mTouchView.center
+        Touch.isHidden = false
+        self.mButtonState = 3
+        if calibrateButton.title(for: .normal) != "Recalibrate" {
+            streamStatus.text = "Calibrated Flip to start…"
+        }
+        calibrateButton.setTitle("Recalibrate", for: .normal)
+        toolTipDismissal(self.tipView)
+    }
+    
+    @IBAction func infoButton(_ sender: Any) {
+        self.tipView = EasyTipView(text: self.streamStatus.text!, preferences: preferences)
+        self.tipView.show(forView: self.info, withinSuperview: self.view)
+    }
+    
+    func toolTipDismissal(_ tipView: EasyTipView) {
+        tipView.dismiss()
+    }
+    
+    
+    @IBOutlet weak var info: UIButton!
+    
+    @IBOutlet weak var mTouchView: DrawView!
+    @IBOutlet weak var mMainView: UIStackView!
+    
+    let volumeView = MPVolumeView(frame: CGRect.zero)
+    //let volumeView = MPVolumeView(frame: CGRect(x:30,y:200,width:200,height:20))
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        
+        preferences.drawing.font = UIFont(name: "Futura-Medium", size: 13)!
+        preferences.drawing.foregroundColor = UIColor.white
+        preferences.drawing.backgroundColor = UIColor(hue:0.6, saturation:0.99, brightness:0.99, alpha:1)
+        preferences.drawing.arrowPosition = EasyTipView.ArrowPosition.top
+
+        
+        self.view.addSubview(volumeView)
+        listenVolumeButton()
+        
+        // start up BTE
+        print("starting peripheral")
+        ble = BLEPeripheralManager()
+        ble?.delegate = self
+        ble!.startBLEPeripheral()
+        
+        EasyTipView.globalPreferences = preferences
+        self.addDoneButtonOnKeyboard()
+        // Do any additional setup after loading the view.
+        start()
+    }
+    
+    func logToScreen(text: String) {
+        print(text)        
+    } 
+ 
+    //
+    override func viewWillAppear(_ animated: Bool) {
+        start()
+
+
+//        NotificationCenter.default.addObserver(self, selector: #selector(volumeChanged(_:)), name: NSNotification.Name(rawValue: "AVSystemController_SystemVolumeDidChangeNotification"), object: nil)
+//        NotificationCenter.default.addObserver(self, selector: #selector(volumeChanged(_:)), name: NSNotification.Name(rawValue: "SystemVolumeDidChange"), object: nil)
+        
+       }
+       
+    @objc func volumeChanged(_ notification: NSNotification) {
+        if let volume = notification.userInfo!["AVSystemController_AudioVolumeNotificationParameter"] as? Float {
+            print("current volume: \(volume)")
+        }
+        
+    }
+       func listenVolumeButton(){
+
+           let audioSession = AVAudioSession.sharedInstance()
+           do {
+
+               try audioSession.setActive(true, options: [])
+
+//               if #available(iOS 15.0, *) {
+//                   print("detected system above ios 15.0")
+//               } else {
+//                   print("detected system below ios 15.0")
+//               }
+
+               audioSession.addObserver(self, forKeyPath: "outputVolume",
+                                        options: NSKeyValueObservingOptions.new, context: nil)
+               audioLevel = audioSession.outputVolume
+           } catch {
+               print("Error accessing audioSession")
+           }
+       }
+    
+       
+       override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+           if keyPath == "outputVolume"{
+               let audioSession = AVAudioSession.sharedInstance()
+               let slider = volumeView.subviews.filter{NSStringFromClass($0.classForCoder) == "MPVolumeSlider"}.first as? UISlider
+                if audioSession.outputVolume > audioLevel || audioSession.outputVolume > 0.999 {
+                    print("Volume Up \(audioSession.outputVolume)")
+                    audioLevel = audioSession.outputVolume
+                    self.mButtonState = 0;
+                }
+                if audioSession.outputVolume < audioLevel || audioSession.outputVolume < 0.001 {
+                    print("Volume Down \(audioSession.outputVolume)")
+                    audioLevel = audioSession.outputVolume
+                    self.mButtonState = 2;
+                }
+                if audioSession.outputVolume > 0.999 {
+                    print("Volume Up at max \(audioSession.outputVolume)")
+//                    (MPVolumeView().subviews.filter{NSStringFromClass($0.classForCoder) == "MPVolumeSlider"}.first as? UISlider)?.setValue(0.95, animated: false)
+                    audioLevel = 0.9375
+                    //print("audioLevel \(audioLevel)")
+                    DispatchQueue.main.asyncAfter(deadline: DispatchTime.now()+0.01)
+                    {
+                        slider?.setValue(0.9375, animated: false)
+                    }
+                    self.mButtonState = 0;
+                }
+
+                if audioSession.outputVolume < 0.001 {
+                    print("Volume Down at min \(audioSession.outputVolume)")
+                    DispatchQueue.main.asyncAfter(deadline: DispatchTime.now()+0.01)
+                    {
+                        slider?.setValue(0.0625, animated: false)
+                    }
+                    
+                    audioLevel = 0.0625
+                    //print("audioLevel \(audioLevel)")
+                    //print("outputVolume after setting \(audioSession.outputVolume)")
+                    self.mButtonState = 2
+                }
+           }
+       }
+    
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        stop()
+    }
+    
+    func recvBLEData() {
+        if mVibrationStrength >= 0 && mVibrationStrength < 4 {
+            HapticsManager.shared.vibrate(for: .warning)
+        }
+        else if mVibrationStrength >= 4 && mVibrationStrength < 7 {
+            HapticsManager.shared.vibrate(for: .error)
+        }
+        else if mVibrationStrength >= 7 && mVibrationStrength <= 10 {
+            HapticsManager.shared.vibrate(for: .success)
+        }
+        else {
+            HapticsManager.shared.impactVibrate()
+        }
+    }
+    
+    func start()  {
+        if(mBLEstarted){
+            print("start() has already been called...")
+            return
+        }
+        ble!.startBLEPeripheral()
+        // set myself to recv the recvBLEData calls
+        ble!.recvDel = self
+                
+        
+//        self.skipSendMax = Int(delay.text!) ?? 0
+//        sliderValue.isEnabled = false
+//        calibrateButton.isEnabled = false
+        mBLEstarted = true
+        DispatchQueue.main.async {
+            self.calculateQuaternionValues()
+            
+            
+        }
+//        handleGyroscope()
+    }
+    
+    func stop() {
+        ble!.stopBLEPeripheral()
+        
+        streamStatus.text = "Click to Re-calibrate"
+        calibrateButton.isEnabled = true
+        sliderValue.isEnabled = true
+//        motion.stopGyroUpdates()
+        motion.stopDeviceMotionUpdates()
+        mBLEstarted = false
+        
+    }
+    
+    func send() {
+        //print("Send")
+        
+        ble!.setReadable("{\"data\":\"" + mSensorData + "\"}")
+        
+//        var response = ""
+        
+        /*
+//        let response = RemoteTunnel().sendArr(data: mSensorData)
+        if server.url != "" && server.port != 0 {
+            response = server.sendArr(data: mSensorData)
+            if response.contains("contact") {
+//                print("Inside response", response)
+                if mVibrationStrength > 0 && mVibrationStrength < 4 {
+                    HapticsManager.shared.vibrate(for: .warning)
+                }
+                else if mVibrationStrength > 4 && mVibrationStrength < 7 {
+                    HapticsManager.shared.vibrate(for: .error)
+                }
+                else if mVibrationStrength > 7 && mVibrationStrength < 10 {
+                    HapticsManager.shared.vibrate(for: .success)
+                }
+                else {
+                    HapticsManager.shared.impactVibrate()
+                }
+            }
+        }
+        */
+//        print(response.elementsEqual("contact"))
+        
+    }
+    
+    func calculateQuaternionValues() {
+        if motion.isDeviceMotionAvailable {
+            let queue = OperationQueue.current
+            motion.deviceMotionUpdateInterval = 0.1
+            motion.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: queue!) { (motion, error) in
+                guard let motion = motion else { return }
+
+                let quat = motion.attitude.quaternion
+                
+                self.mSensorQuat = CMQauternionControl(x: quat.x, y: quat.y, z: quat.z, w: quat.w)
+                
+                if self.mCalibrated {
+                    self.mQuat = self.mCalibrateQuat * self.mSensorQuat
+                    if self.mFlipDown == 0 && abs(self.mQuat.y) > 0.90 {
+                        self.mFlipDown = 1
+                        self.streamStatus.text = "Click to Re-calibrate"
+                        self.mMainView.isHidden = true
+                        print("Device flipped down: ",self.mFlipDown, self.mQuat.y)
+                    }
+                    else if self.mFlipDown == 1 && abs(self.mQuat.y ) < 0.25 {
+                        self.mFlipDown = 0
+                        self.streamStatus.text = "Click to Re-calibrate"
+                        self.mMainView.isHidden = false
+                        print("Device flipped up: ",self.mFlipDown, self.mQuat.y)
+                    }
+                }
+                else {
+                    self.mQuat = self.mSensorQuat
+                }
+
+                //self.wQuaternion.text = "w: \((self.mQuat.w).rounded(toPlaces: 3))"
+                //self.xQuaternion.text = "x: \((self.mQuat.x).rounded(toPlaces: 3))"
+                //self.yQuaternion.text = "y: \((self.mQuat.y).rounded(toPlaces: 3))"
+                //self.zQuaternion.text = "z: \((self.mQuat.z).rounded(toPlaces: 3))"
+                
+            if self.mTouchView.isOnTouch && self.mFlipDown == 1 {
+                //print("TouchView.isOnTouch...")
+                self.mMotionStateY = self.mTouchView.motionY
+                self.mMotionStateX = self.mTouchView.motionX * (-1)
+                self.mSensorData = "\(self.mDeviceId), \(self.mButtonState), \(Double(self.mMotionStateY).rounded(toPlaces: 3)), \(Double(self.mMotionStateX).rounded(toPlaces: 3)), \(Double(self.mQuat.x).rounded(toPlaces: 3)), \(Double(self.mQuat.y).rounded(toPlaces: 3)), \(Double(self.mQuat.z).rounded(toPlaces: 3)), \(Double(self.mQuat.w).rounded(toPlaces: 3))"
+                print(self.mSensorData)
+
+                if self.skipSendMax < 1 {
+                    self.send()
+                    if self.mButtonState == 3 {
+                        self.mButtonState = 0
+                    }
+                }
+                else if self.curSkipSend == 0 {
+                    self.send()
+                    self.curSkipSend += 1
+                    if self.mButtonState == 3 {
+                        self.mButtonState = 0
+                    }
+                }
+                else if self.curSkipSend >= self.skipSendMax {
+                    self.curSkipSend = 0
+                }
+                else {
+                    self.curSkipSend += 1
+                }
+
+            }
+            }
+        }
+        return
+    }
+    
+//    func handleGyroscope() {
+//        motion.gyroUpdateInterval = 0.01
+//        motion.startGyroUpdates(to: OperationQueue.current!) { (data, error) in
+////        print(data as Any)
+//            if let trueData = data {
+//                self.view.reloadInputViews()
+//                let x = trueData.rotationRate.x
+//                let y = trueData.rotationRate.y
+//                let z = trueData.rotationRate.z
+//
+//                if self.motion.isDeviceMotionAvailable == true {
+//
+//                    self.motion.deviceMotionUpdateInterval = 0.1
+//
+//                    let queue = OperationQueue()
+//                    self.motion.startDeviceMotionUpdates(to: queue, withHandler: { [weak self] (motion, error) -> Void in
+//
+//                        if let attitude = motion?.attitude {
+//                            let pitch = abs(attitude.pitch * 180.0/Double.pi)
+//                            let roll = attitude.roll * 180.0/Double.pi
+//                            let yaw = attitude.yaw * 180.0/Double.pi
+//
+//                            let qw = cos(roll/2)*cos(pitch/2)*cos(yaw/2) + sin(roll/2)*sin(pitch/2)*sin(yaw/2)
+//                            let qx = sin(roll/2)*cos(pitch/2)*cos(yaw/2) - cos(roll/2)*sin(pitch/2)*sin(yaw/2)
+//                            let qy = cos(roll/2)*sin(pitch/2)*cos(yaw/2) + sin(roll/2)*cos(pitch/2)*sin(yaw/2)
+//                            let qz = cos(roll/2)*cos(pitch/2)*sin(yaw/2) - sin(roll/2)*sin(pitch/2)*cos(yaw/2)
+//
+//                            self!.mSensorQuat = Quaternion(x: Float32(qx), y: Float32(qy), z: Float32(qz), w: Float32(qw))
+//                            print("Pitch ",attitude.pitch * 180.0/Double.pi)
+//                            print("Absolute Value Pitch ",abs(attitude.pitch * 180.0/Double.pi))
+//                            print("Roll ",attitude.roll * 180.0/Double.pi)
+//                            print("Yaw ",attitude.yaw * 180.0/Double.pi)
+//                            self!.mSensorQuat = Quaternion(angle: Float32(pitch), axis: Vector3(x: Float32(x), y: Float32(y), z: Float32(z)))
+//
+//                            }
+//                        })
+//
+//                    }
+//                self.mSensorQuat = Quaternion(x: Float32(x), y: Float32(y), z: Float32(z), w: 1.0)
+//                self.mSensorQuat = Quaternion(angle: 90.0, axis: Vector3(x: Float32(x), y: Float32(y), z: Float32(z)))
+//
+//                if self.mCalibrated {
+//                    self.mQuat = self.mCalibrateQuat * self.mSensorQuat
+//                    if self.mFlipDown == 0 && abs(self.mQuat.x) > 0.92 {
+//                        self.mFlipDown = 1
+//                    }
+//                    else if self.mFlipDown == 1 && abs(self.mQuat.x) < 0.1 {
+//                        self.mFlipDown = 0
+//                    }
+//                }
+//
+//                else {
+//                    self.mQuat = self.mSensorQuat
+//                }
+//
+//                self.wQuaternion.text = "w: \(Double(self.mQuat.w).rounded(toPlaces: 3))"
+//                self.xQuaternion.text = "x: \(Double(self.mQuat.x).rounded(toPlaces: 3))"
+//                self.yQuaternion.text = "y: \(Double(self.mQuat.y).rounded(toPlaces: 3))"
+//                self.zQuaternion.text = "z: \(Double(self.mQuat.z).rounded(toPlaces: 3))"
+//            }
+            
+//            if self.mTouchView.isOnTouch {
+//                self.mMotionStateY = self.mTouchView.motionY
+//                self.mMotionStateX = self.mTouchView.motionY
+//                self.mSensorData = "\(self.mDeviceId) \(self.mButtonState) \(Double(self.mMotionStateY).rounded(toPlaces: 3)) \(Double(self.mMotionStateX).rounded(toPlaces: 3)) \(Double(self.mQuat.x).rounded(toPlaces: 3)) \(Double(self.mQuat.y).rounded(toPlaces: 3)) \(Double(self.mQuat.z).rounded(toPlaces: 3)) \(Double(self.mQuat.w).rounded(toPlaces: 3))"
+//                print(self.mSensorData)
+//
+//                if self.skipSendMax < 1 {
+//                    self.send()
+//                    if self.mButtonState == 3 {
+//                        self.mButtonState = 0
+//                    }
+//                }
+//                else if self.curSkipSend == 0 {
+//                    self.send()
+//                    self.curSkipSend += 1
+//                    if self.mButtonState == 3 {
+//                        self.mButtonState = 0
+//                    }
+//                }
+//                else if self.curSkipSend >= self.skipSendMax {
+//                    self.curSkipSend = 0
+//                }
+//                else {
+//                    self.curSkipSend += 1
+//                }
+//
+//            }
+//        }
+//        return
+//    }
+
+
+
+}
+
+extension Double {
+    func rounded(toPlaces places:Int) -> Double {
+        let divisor = pow(10.0, Double(places))
+        return (self * divisor).rounded() / divisor
+    }
+}
